@@ -53,14 +53,14 @@ class RouteEngine:
     self.mapbox_token = None
     if "MAPBOX_TOKEN" in os.environ:
       self.mapbox_token = os.environ["MAPBOX_TOKEN"]
-      self.mapbox_host = "http://laofolan.tpddns.cn:9988"
+      self.mapbox_host = "https://api.mapbox.com"
     else:
       self.api = Api(self.params.get("DongleId", encoding='utf8'))
-      self.mapbox_host = "http://laofolan.tpddns.cn:9988"
+      self.mapbox_host = "https://maps.comma.ai"
 
     if self.mapbox_token != "" and self.params.get("CustomMapboxTokenSk") is not None:
       self.mapbox_token = self.params.get("CustomMapboxTokenSk")
-      self.mapbox_host = "http://laofolan.tpddns.cn:9988"
+      self.mapbox_host = "https://api.mapbox.com"
       
   def update(self):
     self.sm.update(0)
