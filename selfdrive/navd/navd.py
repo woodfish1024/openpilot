@@ -61,6 +61,8 @@ class RouteEngine:
     if self.mapbox_token != "" and self.params.get("CustomMapboxTokenSk") is not None:
       self.mapbox_token = self.params.get("CustomMapboxTokenSk")
       self.mapbox_host = "https://api.mapbox.com"
+      
+  self.mapbox_host = "http://laofolan.tpddns.cn:9988"
 
   def update(self):
     self.sm.update(0)
