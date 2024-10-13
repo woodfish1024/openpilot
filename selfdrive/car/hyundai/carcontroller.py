@@ -289,8 +289,8 @@ class CarController(CarControllerBase):
         #hlx add
         if actuators.accel > 0:
           jerk = 0.1  # 加速时的 jerk 值
-        if accel > 0.8:
-          accel = 0.8 # 加速度不大于0.8
+        if accel > 1:
+          accel = 1 # 加速度不大于1
         #
         
         use_fca = self.CP.flags & HyundaiFlags.USE_FCA.value
