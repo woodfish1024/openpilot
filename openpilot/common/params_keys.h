@@ -300,6 +300,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EnableRadarTracks", {PERSISTENT, INT, "0"}},
     {"RadarLatFactor", {PERSISTENT, INT, "0"}},
     {"EnableCornerRadar", {PERSISTENT, INT, "0"}},
+    {"EnableEscc", {PERSISTENT, INT, "0"}},
     {"CarrotRadarMode", {PERSISTENT, INT, "0"}},
     {"CarrotRadarCutInSensitivity", {PERSISTENT, INT, "3"}},
     {"RadarMotionMode", {PERSISTENT, INT}},  // one-time migration to CarrotRadarMode

@@ -403,6 +403,7 @@
           "en": "Radar",
           "zh": "雷达",
           "params": [
+            "EnableEscc",
             "EnableRadarTracks",
             "EnableCornerRadar",
             "CarrotRadarMode",
@@ -2609,6 +2610,22 @@
       "cdescr": "-1: 始终使用 SCC\n0: 使用 SCC 雷达\n1: 使用雷达轨迹\n2: 雷达轨迹 + 低速 SCC\n3: 雷达轨迹 + 低速 SCC + 切入车辆 + 隐形车辆",
       "min": -2,
       "max": 3,
+      "default": 0,
+      "unit": 1
+    },
+    {
+      "group": "레이더설정",
+      "name": "EnableEscc",
+      "title": "ESCC 사용(0)",
+      "descr": "1: ESCC 사용",
+      "egroup": "RADAR",
+      "etitle": "Enable ESCC(0)",
+      "edescr": "1: Enable ESCC",
+      "cgroup": "雷达设置",
+      "ctitle": "开启 ESCC (0)",
+      "cdescr": "1: 开启 ESCC",
+      "min": 0,
+      "max": 1,
       "default": 0,
       "unit": 1
     },
