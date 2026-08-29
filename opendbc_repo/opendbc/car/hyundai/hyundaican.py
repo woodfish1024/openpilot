@@ -261,7 +261,7 @@ def create_acc_opt_copy(CS, packer):
     values["NEW_SIGNAL_2"]  = 0
   return packer.make_can_msg("SCC13", 0, CS.scc13)
 
-def create_acc_commands(packer, enabled, accel, jerk, idx, hud_control, set_speed, stopping, long_override, use_fca, CP, CS, soft_hold_mode):
+def create_acc_commands(packer, enabled, accel, jerk, idx, hud_control, set_speed, stopping, long_override, use_fca, CP, CS, soft_hold_mode, escc):
   from opendbc.car.hyundai.carcontroller import HyundaiJerk
   cruise_available = CS.out.cruiseState.available
   soft_hold_active = CS.softHoldActive
@@ -318,7 +318,13 @@ def create_acc_commands(packer, enabled, accel, jerk, idx, hud_control, set_spee
   # these signals also prevent a TCS fault on non-FCA cars with alpha longitudinal
   if not use_fca:
     scc12_values["CF_VSM_ConfMode"] = 1
-    scc12_values["AEB_Status"] = 1  # AEB disabled
+    scc12_values["AEB_Status"] = 2 if escc else 1  # AEB disabled
+
+  if escc:
+    scc12_values["AEB_CmdAct"] = CS.escc_cmd_act
+    scc12_values["CF_VSM_Warn"] = CS.escc_aeb_warning
+    scc12_values["CF_VSM_DecCmdAct"] = CS.escc_aeb_dec_cmd_act
+    scc12_values["CR_VSM_DecCmd"] = CS.escc_aeb_dec_cmd
 
   scc12_dat = packer.make_can_msg("SCC12", 0, scc12_values)[1]
   scc12_values["CR_VSM_ChkSum"] = 0x10 - sum(sum(divmod(i, 16)) for i in scc12_dat) % 0x10
@@ -338,7 +344,7 @@ def create_acc_commands(packer, enabled, accel, jerk, idx, hud_control, set_spee
 
   # Only send FCA11 on cars where it exists on the bus
   # On Camera SCC cars, FCA11 is not disabled, so we forward stock FCA11 back to the car forward hooks
-  if use_fca and not (CP.flags & HyundaiFlags.CAMERA_SCC):
+  if use_fca and not (CP.flags & HyundaiFlags.CAMERA_SCC) and not escc:
     # note that some vehicles most likely have an alternate checksum/counter definition
     # https://github.com/commaai/opendbc/commit/9ddcdb22c4929baf310295e832668e6e7fcfa602
     fca11_values = {
@@ -353,7 +359,7 @@ def create_acc_commands(packer, enabled, accel, jerk, idx, hud_control, set_spee
 
   return commands
 
-def create_acc_opt(packer, CP):
+def create_acc_opt(packer, CP, escc):
   commands = []
 
   scc13_values = {
@@ -365,7 +371,7 @@ def create_acc_opt(packer, CP):
 
   # TODO: this needs to be detected and conditionally sent on unsupported long cars
   # On Camera SCC cars, FCA12 is not disabled, so we forward stock FCA12 back to the car forward hooks
-  if not (CP.flags & HyundaiFlags.CAMERA_SCC):
+  if not (CP.flags & HyundaiFlags.CAMERA_SCC) and not escc:
     fca12_values = {
       "FCA_DrvSetState": 2,
       "FCA_USM": 1, # AEB disabled
