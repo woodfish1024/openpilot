@@ -205,7 +205,10 @@ function start_carrot_web {
 }
 
 function invalidate_modeld_build_if_needed {
-  local stamp_path="$DIR/openpilot/selfdrive/modeld/models/.build_stamp"
+  # Keep the stamp OUTSIDE openpilot/selfdrive/modeld: the stamp value is the
+  # git tree hash of that directory, so a stamp file inside it would change the
+  # value it records (self-reference) and never match after commit.
+  local stamp_path="$DIR/.build_stamp"
   local big_stamp_path="$DIR/openpilot/selfdrive/modeld/models/.big_model_build_stamp"
   local tg_devices_path="$DIR/openpilot/selfdrive/modeld/models/tg_input_devices.json"
   local driving_pkl_path="$DIR/openpilot/selfdrive/modeld/models/driving_tinygrad.pkl"
@@ -397,7 +400,8 @@ function launch {
     fi
     if [ "$FORCE_REBUILD" = "1" ]; then
       mkdir -p "$DIR/openpilot/selfdrive/modeld/models"
-      echo -n "$MODEL_BUILD_STAMP_VALUE" > "$DIR/openpilot/selfdrive/modeld/models/.build_stamp"
+      echo -n "$MODEL_BUILD_STAMP_VALUE" > "$DIR/.build_stamp"
+      rm -f "$DIR/openpilot/selfdrive/modeld/models/.build_stamp"
       if [ -n "$BIG_MODEL_SHA" ] && [ -f "${BIG_MODEL_PKL_PATH}.chunkmanifest" ]; then
         echo -n "$BIG_MODEL_SHA" > "$DIR/openpilot/selfdrive/modeld/models/.big_model_build_stamp"
       fi
