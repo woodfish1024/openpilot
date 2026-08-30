@@ -5,15 +5,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CARROT_ROOT = SCRIPT_DIR.parents[1]
 DEFAULT_CASES = CARROT_ROOT / "cluster" / "cutin_validation_cases.json"
 SIMULATOR_MODULE = "openpilot.selfdrive.carrot.radar.tools.radar_lead_simulator"
+VALIDATION_PRELOAD_AHEAD = 5
+ROUTE_SCHEMA_CACHE_ENV = "CARROT_ROUTE_SCHEMA_CACHE_DIR"
 
 
 def group_cases_by_log(cases: list[dict]) -> list[list[dict]]:
@@ -22,6 +26,25 @@ def group_cases_by_log(cases: list[dict]) -> list[list[dict]]:
     key = (str(case["vehicle_folder"]), str(case["log"]))
     groups.setdefault(key, []).append(case)
   return list(groups.values())
+
+
+def rolling_preload_indexes(
+  current_index: int,
+  route_available: list[bool],
+  scheduled_indexes: set[int],
+  preload_ahead: int = VALIDATION_PRELOAD_AHEAD,
+) -> list[int]:
+  """Return unscheduled indexes needed to keep a rolling look-ahead full."""
+  window = [
+    candidate_index
+    for candidate_index in range(current_index + 1, len(route_available))
+    if route_available[candidate_index]
+  ][:preload_ahead]
+  return [
+    candidate_index
+    for candidate_index in window
+    if candidate_index not in scheduled_indexes
+  ]
 
 
 def simulator_command(
@@ -34,6 +57,9 @@ def simulator_command(
   motion_mode: str | None = None,
   sensitivity: int | None = None,
   enable_radar_tracks: int = 2,
+  cache_dir: Path | None = None,
+  preload_only: bool = False,
+  consume_cache: bool = False,
 ) -> list[str]:
   command = [
     sys.executable,
@@ -59,14 +85,43 @@ def simulator_command(
     command.append("--front-only")
   elif motion_mode is not None:
     command.extend(("--motion-mode", motion_mode))
+  if cache_dir is not None:
+    command.extend(("--cache-dir", str(cache_dir)))
+  if preload_only:
+    command.append("--preload-only")
+  if consume_cache:
+    command.append("--consume-cache")
   return command
+
+
+def simulator_environment(cache_dir: Path, group_index: int) -> dict[str, str]:
+  environment = os.environ.copy()
+  environment[ROUTE_SCHEMA_CACHE_ENV] = str(
+    cache_dir / "schema" / f"log-{group_index:03d}",
+  )
+  return environment
+
+
+def _stop_preloads(preloads: dict[int, subprocess.Popen]) -> None:
+  for process in preloads.values():
+    if process.poll() is None:
+      process.terminate()
+  for process in preloads.values():
+    try:
+      process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+      process.kill()
+      process.wait()
 
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(
     description="Replay validation logs showing only the physical dPath predictor",
   )
-  parser.add_argument("--root", type=Path, default=Path(r"W:\routes"))
+  parser.add_argument(
+    "--root", type=Path,
+    default=Path(r"\\DS1821P\openpilot\routes"),
+  )
   parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
   parser.add_argument("--case", action="append", default=[])
   parser.add_argument(
@@ -139,45 +194,109 @@ def main() -> int:
     return 0
 
   groups = group_cases_by_log(cases)
+  routes = [
+    args.root / group[0]["vehicle_folder"] / Path(group[0]["log"])
+    for group in groups
+  ]
+  route_available = [route.is_file() for route in routes]
   missing = 0
+  failed_logs = 0
   opened_cases = 0
   opened_logs = 0
-  for index, group in enumerate(groups, 1):
-    case = group[0]
-    route = args.root / case["vehicle_folder"] / Path(case["log"])
-    if not route.is_file():
-      missing += len(group)
+  with tempfile.TemporaryDirectory(prefix="carrot-radar-review-") as directory:
+    cache_dir = Path(directory)
+    preloads: dict[int, subprocess.Popen] = {}
+
+    def start_next_preloads(current_index: int) -> None:
+      next_indexes = rolling_preload_indexes(
+        current_index,
+        route_available,
+        set(preloads),
+      )
+      for candidate_index in next_indexes:
+        command = simulator_command(
+          groups[candidate_index],
+          args.root,
+          args.cases,
+          args.prob,
+          f"{candidate_index + 1}/{len(groups)}",
+          args.front_only,
+          args.motion_mode,
+          args.sensitivity,
+          args.enable_radar_tracks,
+          cache_dir=cache_dir,
+          preload_only=True,
+        )
+        preloads[candidate_index] = subprocess.Popen(
+          command,
+          env=simulator_environment(cache_dir, candidate_index),
+          stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL,
+        )
+
+    try:
       print(
-        f"[{index:02d}/{len(groups):02d}] MISSING {len(group)} cases: {route}",
+        f"Rolling preload: keeping the next {VALIDATION_PRELOAD_AHEAD} logs ready.",
         flush=True,
       )
-      continue
-    ids = ", ".join(str(item["id"]) for item in group)
-    print(
-      f"\n[{index:02d}/{len(groups):02d}] {len(group)} cases in one log: {ids}",
-      flush=True,
-    )
-    command = simulator_command(
-      group,
-      args.root,
-      args.cases,
-      args.prob,
-      f"{index}/{len(groups)}",
-      args.front_only,
-      args.motion_mode,
-      args.sensitivity,
-      args.enable_radar_tracks,
-    )
-    result = subprocess.run(command, check=False)
-    if result.returncode != 0:
-      return result.returncode
-    opened_logs += 1
-    opened_cases += len(group)
+      for group_index, (group, route) in enumerate(zip(groups, routes, strict=True)):
+        index = group_index + 1
+        if not route_available[group_index]:
+          missing += len(group)
+          print(
+            f"[{index:02d}/{len(groups):02d}] MISSING {len(group)} cases: {route}",
+            flush=True,
+          )
+          continue
+        preload = preloads.pop(group_index, None)
+        if preload is not None:
+          returncode = preload.wait()
+          if returncode != 0:
+            print(
+              f"[{index:02d}/{len(groups):02d}] preload failed; loading normally",
+              flush=True,
+            )
+        start_next_preloads(group_index)
+        ids = ", ".join(str(item["id"]) for item in group)
+        print(
+          f"\n[{index:02d}/{len(groups):02d}] {len(group)} cases in one log: {ids}",
+          flush=True,
+        )
+        command = simulator_command(
+          group,
+          args.root,
+          args.cases,
+          args.prob,
+          f"{index}/{len(groups)}",
+          args.front_only,
+          args.motion_mode,
+          args.sensitivity,
+          args.enable_radar_tracks,
+          cache_dir=cache_dir,
+          consume_cache=True,
+        )
+        result = subprocess.run(
+          command,
+          check=False,
+          env=simulator_environment(cache_dir, group_index),
+        )
+        if result.returncode != 0:
+          failed_logs += 1
+          print(
+            f"[{index:02d}/{len(groups):02d}] viewer exited with "
+            + f"code {result.returncode}; continuing with the next log",
+            flush=True,
+          )
+          continue
+        opened_logs += 1
+        opened_cases += len(group)
+    finally:
+      _stop_preloads(preloads)
   print(
     f"\nVisual review complete: {opened_cases}/{len(cases)} labeled windows "
     + f"in {opened_logs}/{len(groups)} unique logs"
   )
-  return int(missing > 0)
+  return int(missing > 0 or failed_logs > 0)
 
 
 if __name__ == "__main__":

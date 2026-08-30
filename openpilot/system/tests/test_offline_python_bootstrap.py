@@ -220,9 +220,10 @@ def test_optional_egpu_build_retries_transient_pcie_link_startup() -> None:
   assert "check_usbgpu(timeout=USBGPU_READINESS_TIMEOUT, require_clean_link=False)" in source
   assert "USB eGPU not ready for optional model compilation" in source
   assert "USBGPU_BUILD_ATTEMPTS = 6" in source
-  assert "USBGPU_READINESS_ATTEMPTS = 3" in source
+  assert "USBGPU_READINESS_ATTEMPTS = 6" in source
+  assert "USBGPU_READINESS_RETRY_INTERVAL = 3.0" in source
   assert "USBGPU_READINESS_TIMEOUT = 30.0" in source
-  assert 'USBGPU_TRANSIENT_READINESS_ERRORS = {"12V / PCIe not ready", "USB link errors", "GPU check timed out"}' in source
+  assert 'USBGPU_TRANSIENT_READINESS_ERRORS = {"12V / PCIe not ready", "USB link errors", "GPU check timed out", "GPU incompatible"}' in source
   assert 'write_big_model_status(model_cache_dir(), "checking"' in source
   assert "USB eGPU transient readiness error" in source
   assert "USBGPU_ENUMERATION_WAIT_SECONDS = 20.0" in source
@@ -252,3 +253,10 @@ def test_tinygrad_waits_for_custom_egpu_pcie_link_training() -> None:
   assert "self.reset_usb_bridge()" not in source
   assert "while ltssm != self.PCIE_LINK_READY" in source
   assert "time.sleep(self.PCIE_LINK_POLL_INTERVAL_S)" in source
+
+
+def test_tinygrad_bounds_usbgpu_copy_staging_transfers() -> None:
+  source = (Path(BASEDIR) / "tinygrad_repo/tinygrad/runtime/ops_amd.py").read_text(encoding="utf-8")
+
+  assert "USBGPU_COPY_BUFFER_SIZE = 64 * 1024" in source
+  assert "size=USBGPU_COPY_BUFFER_SIZE" in source

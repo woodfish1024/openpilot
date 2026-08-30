@@ -7,12 +7,15 @@ from types import SimpleNamespace
 import pytest
 
 from openpilot.selfdrive.carrot.radar_motion import model_path_point_at_s
+from openpilot.selfdrive.carrot.radar.tools import radar_lead_validation_review
 from openpilot.selfdrive.carrot.radar.tools.radar_lead_simulator import (
   Candidate,
   CurrentRadardSelector,
   ModelLead,
   RadarFrame,
   RadarMotionShadowSelector,
+  RadarOccupancyV2Selector,
+  RadarOccupancyV3Selector,
   RadarPoint,
   RecordedLead,
   Selection,
@@ -31,6 +34,7 @@ from openpilot.selfdrive.carrot.radar.tools.radar_lead_simulator import (
   load_validation_motion_mode,
   load_validation_probability,
   load_validation_sensitivity,
+  load_visual_replay_cache,
   motion_points_at_model_time,
   monotonic_log_events,
   preferred_radar_motion_sensor,
@@ -40,15 +44,20 @@ from openpilot.selfdrive.carrot.radar.tools.radar_lead_simulator import (
   save_validation_motion_mode,
   save_validation_probability,
   save_validation_sensitivity,
+  save_visual_replay_cache,
   trajectory_history_display_y,
   trajectory_model_review_events,
   update_validation_case_label,
   vision_lead_continuity_segments,
   vision_lead_display_value,
   vision_lead_rgb,
+  visual_replay_cache_path,
 )
 from openpilot.selfdrive.carrot.radar.tools.radar_lead_validation_review import (
+  VALIDATION_PRELOAD_AHEAD,
   group_cases_by_log,
+  rolling_preload_indexes,
+  simulator_environment,
   simulator_command,
 )
 from openpilot.selfdrive.carrot.radar.tools.validate_radar_lead_model import (
@@ -145,6 +154,114 @@ def test_shadow_selector_uses_new_controller_not_recorded_radard_roles() -> None
   assert selection.lead_two is None
   assert selection.active_cutin_candidates == ()
   assert any(candidate.track_id == 1010 for candidate in selection.cutin_diagnostics)
+
+
+def test_visual_review_can_cycle_cached_v1_v2_and_v3(tmp_path) -> None:
+  frames = [
+    frame(
+      (point(1010, 8.0, -3.0, source="corner235"),),
+      time_s=index * 0.1,
+    )
+    for index in range(3)
+  ]
+  v1 = RadarMotionShadowSelector(
+    frames,
+    motion_sensor="corner",
+    enable_radar_tracks=2,
+  )
+  v2 = RadarOccupancyV2Selector(
+    frames,
+    baseline=v1,
+    enable_radar_tracks=2,
+  )
+  v3 = RadarOccupancyV3Selector(frames, enable_radar_tracks=2)
+  ui = SimulatorUI(
+    frames,
+    v2,
+    "test",
+    tmp_path / "rlog.zst",
+    settings_path=tmp_path / "radar_validation.json",
+    v3_selector=v3,
+  )
+
+  assert ui.use_occupancy_v2
+  assert ui.selector is v2
+  assert v2.baseline is v1
+  assert v2.enable_radar_tracks == v1.enable_radar_tracks
+  assert v2.cut_in_sensitivity == v1.cut_in_sensitivity
+
+  ui._toggle_occupancy_version()
+  assert not ui.use_occupancy_v2
+  assert ui.occupancy_version == 3
+  assert ui.selector is v3
+  assert "V3" in ui.status
+
+  ui._toggle_occupancy_version()
+  assert ui.occupancy_version == 1
+  assert ui.selector is v1
+  assert "V1" in ui.status
+
+  ui._toggle_occupancy_version()
+  assert ui.use_occupancy_v2
+  assert ui.occupancy_version == 2
+  assert ui.selector is v2
+  assert "V2" in ui.status
+
+
+def test_visual_replay_cache_round_trip_and_exact_configuration(tmp_path) -> None:
+  log_path = tmp_path / "rlog.zst"
+  log_path.write_bytes(b"test-log-identity")
+  frames = [
+    frame(
+      (point(1010, 8.0, -3.0, source="corner235"),),
+      time_s=index * 0.1,
+    )
+    for index in range(3)
+  ]
+  v1 = RadarMotionShadowSelector(
+    frames,
+    motion_sensor="corner",
+    enable_radar_tracks=2,
+  )
+  v2 = RadarOccupancyV2Selector(
+    frames,
+    baseline=v1,
+    enable_radar_tracks=2,
+  )
+  v3 = RadarOccupancyV3Selector(frames, enable_radar_tracks=2)
+  cache_path = visual_replay_cache_path(
+    tmp_path / "cache",
+    log_path,
+    motion_mode="normal",
+    cut_in_sensitivity=3,
+    probability_override=None,
+    enable_radar_tracks=2,
+  )
+
+  save_visual_replay_cache(cache_path, frames, v2, v3)
+  cached = load_visual_replay_cache(cache_path)
+
+  assert cached is not None
+  cached_frames, cached_v2, cached_v3 = cached
+  assert cached_frames == frames
+  assert cached_v2.selections == v2.selections
+  assert cached_v2.baseline.selections == v1.selections
+  assert cached_v3.selections == v3.selections
+  assert visual_replay_cache_path(
+    tmp_path / "cache",
+    log_path,
+    motion_mode="front",
+    cut_in_sensitivity=3,
+    probability_override=None,
+    enable_radar_tracks=2,
+  ) != cache_path
+
+
+def test_visual_replay_cache_ignores_damaged_file(tmp_path) -> None:
+  cache_path = tmp_path / "damaged.pickle"
+  cache_path.write_bytes(b"not a pickle")
+
+  assert load_visual_replay_cache(cache_path) is None
 
 
 def test_shadow_selector_rejects_far_corner_only_tunnel_fixture() -> None:
@@ -758,6 +875,24 @@ def test_validation_runner_forwards_device_sensitivity_override(tmp_path) -> Non
   assert "--lookahead-s" not in command
 
 
+def test_validation_runner_can_preload_and_consume_private_cache(tmp_path) -> None:
+  command = simulator_command(
+    [{"id": "case-a"}],
+    tmp_path,
+    tmp_path / "cases.json",
+    None,
+    "2/40",
+    False,
+    cache_dir=tmp_path / "cache",
+    preload_only=True,
+    consume_cache=True,
+  )
+
+  assert command[command.index("--cache-dir") + 1] == str(tmp_path / "cache")
+  assert "--preload-only" in command
+  assert "--consume-cache" in command
+
+
 def test_predictor_event_pause_seeks_to_first_unhandled_marker() -> None:
   ui = object.__new__(SimulatorUI)
   ui.times = (0.0, 0.1, 0.2, 0.3)
@@ -835,6 +970,153 @@ def test_lead_continuity_breaks_on_missing_frames_and_track_id_changes() -> None
     [10],
     [11],
   ]
+
+
+def test_validation_runner_keeps_five_log_rolling_preload() -> None:
+  route_available = [True] * 10
+  scheduled: set[int] = set()
+  started: list[int] = []
+
+  for current_index in range(len(route_available)):
+    scheduled.discard(current_index)
+    new_indexes = rolling_preload_indexes(
+      current_index,
+      route_available,
+      scheduled,
+    )
+    if current_index == 0:
+      assert new_indexes == [1, 2, 3, 4, 5]
+    elif current_index <= 4:
+      assert new_indexes == [current_index + VALIDATION_PRELOAD_AHEAD]
+    scheduled.update(new_indexes)
+    started.extend(new_indexes)
+    expected_ready = min(
+      VALIDATION_PRELOAD_AHEAD,
+      len(route_available) - current_index - 1,
+    )
+    assert len(scheduled) == expected_ready
+
+  assert started == list(range(1, len(route_available)))
+
+
+def test_validation_runner_rolling_preload_skips_missing_logs() -> None:
+  route_available = [True, True, False, True, True, False, True, True]
+
+  assert rolling_preload_indexes(
+    0,
+    route_available,
+    set(),
+  ) == [1, 3, 4, 6, 7]
+  assert rolling_preload_indexes(
+    1,
+    route_available,
+    {3, 4, 6, 7},
+  ) == []
+
+
+def test_validation_runner_replenishes_five_log_buffer_to_end(
+  tmp_path,
+  monkeypatch,
+) -> None:
+  cases = []
+  for index in range(8):
+    relative_log = f"segment-{index}/rlog.zst"
+    route = tmp_path / "CAR" / relative_log
+    route.parent.mkdir(parents=True, exist_ok=True)
+    route.write_bytes(b"log")
+    cases.append({
+      "id": f"case-{index}",
+      "vehicle_folder": "CAR",
+      "log": relative_log,
+      "expected": "detect",
+    })
+  cases_path = tmp_path / "cases.json"
+  cases_path.write_text(json.dumps({"cases": cases}), encoding="utf-8")
+  args = SimpleNamespace(
+    root=tmp_path,
+    cases=cases_path,
+    case=[],
+    expected="all",
+    prob=None,
+    sensitivity=3,
+    enable_radar_tracks=2,
+    front_only=False,
+    motion_mode="normal",
+    list=False,
+  )
+  preload_commands: list[list[str]] = []
+  preload_schema_dirs: list[str] = []
+  foreground_commands: list[list[str]] = []
+  foreground_schema_dirs: list[str] = []
+
+  class FakePreload:
+    def __init__(self, command, **_kwargs) -> None:
+      preload_commands.append(command)
+      preload_schema_dirs.append(
+        _kwargs["env"][radar_lead_validation_review.ROUTE_SCHEMA_CACHE_ENV],
+      )
+
+    def poll(self) -> int:
+      return 0
+
+    def wait(self, timeout=None) -> int:
+      del timeout
+      return 0
+
+    def terminate(self) -> None:
+      raise AssertionError("completed preload must not be terminated")
+
+    def kill(self) -> None:
+      raise AssertionError("completed preload must not be killed")
+
+  def fake_run(command, *, check, env):
+    assert not check
+    foreground_commands.append(command)
+    foreground_schema_dirs.append(
+      env[radar_lead_validation_review.ROUTE_SCHEMA_CACHE_ENV],
+    )
+    return SimpleNamespace(
+      returncode=9 if len(foreground_commands) == 1 else 0,
+    )
+
+  monkeypatch.setattr(radar_lead_validation_review, "parse_args", lambda: args)
+  monkeypatch.setattr(
+    radar_lead_validation_review.subprocess,
+    "Popen",
+    FakePreload,
+  )
+  monkeypatch.setattr(
+    radar_lead_validation_review.subprocess,
+    "run",
+    fake_run,
+  )
+
+  assert radar_lead_validation_review.main() == 1
+  preload_ids = [
+    command[command.index("--validation-case") + 1]
+    for command in preload_commands
+  ]
+  foreground_ids = [
+    command[command.index("--validation-case") + 1]
+    for command in foreground_commands
+  ]
+  assert preload_ids[:5] == [f"case-{index}" for index in range(1, 6)]
+  assert preload_ids == [f"case-{index}" for index in range(1, 8)]
+  assert foreground_ids == [f"case-{index}" for index in range(8)]
+  assert len(set(preload_schema_dirs)) == 7
+  assert len(set(foreground_schema_dirs)) == 8
+
+
+def test_validation_runner_gives_each_loader_a_private_schema_dir(
+  tmp_path,
+) -> None:
+  first = simulator_environment(tmp_path, 1)
+  second = simulator_environment(tmp_path, 2)
+
+  key = radar_lead_validation_review.ROUTE_SCHEMA_CACHE_ENV
+  assert first[key] == str(tmp_path / "schema" / "log-001")
+  assert second[key] == str(tmp_path / "schema" / "log-002")
+  assert first[key] != second[key]
 
 
 def test_lead_speed_continuity_converts_vlead_to_kph() -> None:
